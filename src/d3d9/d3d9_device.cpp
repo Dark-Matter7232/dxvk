@@ -201,8 +201,11 @@ namespace dxvk {
     if (riid == __uuidof(IDirect3DDevice9Ex))
       return E_NOINTERFACE;
 
-    Logger::warn("D3D9DeviceEx::QueryInterface: Unknown interface query");
-    Logger::warn(str::format(riid));
+    if (logQueryInterfaceError(__uuidof(IDirect3DDevice9), riid)) {
+      Logger::warn("D3D9DeviceEx::QueryInterface: Unknown interface query");
+      Logger::warn(str::format(riid));
+    }
+
     return E_NOINTERFACE;
   }
 
@@ -2301,13 +2304,8 @@ namespace dxvk {
     if (unlikely(pValue == nullptr))
       return D3DERR_INVALIDCALL;
 
-    *pValue = 0;
-
-    if (unlikely(Stage >= caps::TextureStageCount))
-      return D3DERR_INVALIDCALL;
-
-    if (unlikely(dxvkType >= TextureStageStateCount))
-      return D3DERR_INVALIDCALL;
+    Stage = std::min(Stage, DWORD(caps::TextureStageCount - 1));
+    dxvkType = std::min(dxvkType, D3D9TextureStageStateTypes(DXVK_TSS_COUNT - 1));
 
     *pValue = m_state.textureStages[Stage][dxvkType];
 
@@ -3873,13 +3871,13 @@ namespace dxvk {
           DWORD                      Stage,
           D3D9TextureStageStateTypes Type,
           DWORD                      Value) {
+    
+    // Clamp values instead of checking and returning INVALID_CALL
+    // Matches tests + Dawn of Magic 2 relies on it.
+    Stage = std::min(Stage, DWORD(caps::TextureStageCount - 1));
+    Type = std::min(Type, D3D9TextureStageStateTypes(DXVK_TSS_COUNT - 1));
+
     D3D9DeviceLock lock = LockDevice();
-
-    if (unlikely(Stage >= caps::TextureStageCount))
-      return D3DERR_INVALIDCALL;
-
-    if (unlikely(Type >= TextureStageStateCount))
-      return D3DERR_INVALIDCALL;
 
     if (unlikely(ShouldRecord()))
       return m_recorder->SetStateTextureStageState(Stage, Type, Value);
@@ -5145,11 +5143,11 @@ namespace dxvk {
   void D3D9DeviceEx::UploadConstants() {
     if constexpr (ShaderStage == DxsoProgramTypes::VertexShader) {
       if (CanSWVP())
-        return UploadSoftwareConstantSet(m_state.vsConsts, m_vsLayout);
+        return UploadSoftwareConstantSet(m_state.vsConsts.get(), m_vsLayout);
       else
-        return UploadConstantSet<ShaderStage, D3D9ShaderConstantsVSHardware>(m_state.vsConsts, m_vsLayout, m_state.vertexShader);
+        return UploadConstantSet<ShaderStage, D3D9ShaderConstantsVSHardware>(m_state.vsConsts.get(), m_vsLayout, m_state.vertexShader);
     } else {
-      return UploadConstantSet<ShaderStage, D3D9ShaderConstantsPS>          (m_state.psConsts, m_psLayout, m_state.pixelShader);
+      return UploadConstantSet<ShaderStage, D3D9ShaderConstantsPS>          (m_state.psConsts.get(), m_psLayout, m_state.pixelShader);
     }
   }
 
@@ -6257,7 +6255,7 @@ namespace dxvk {
 
       if (likely(!CanSWVP())) {
         UpdateVertexBoolSpec(
-          m_state.vsConsts.bConsts[0] &
+          m_state.vsConsts->bConsts[0] &
           m_consts[DxsoProgramType::VertexShader].meta.boolConstantMask);
       } else
         UpdateVertexBoolSpec(0);
@@ -6285,7 +6283,7 @@ namespace dxvk {
         UpdatePixelShaderSamplerSpec(m_textureTypes, programInfo.minorVersion() >= 4 ? 0u : projected, fetch4); // For implicit samplers...
 
       UpdatePixelBoolSpec(
-        m_state.psConsts.bConsts[0] &
+        m_state.psConsts->bConsts[0] &
         m_consts[DxsoProgramType::PixelShader].meta.boolConstantMask);
     }
     else {
@@ -6526,16 +6524,16 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::SetVertexBoolBitfield(uint32_t idx, uint32_t mask, uint32_t bits) {
-    m_state.vsConsts.bConsts[idx] &= ~mask;
-    m_state.vsConsts.bConsts[idx] |= bits & mask;
+    m_state.vsConsts->bConsts[idx] &= ~mask;
+    m_state.vsConsts->bConsts[idx] |= bits & mask;
 
     m_consts[DxsoProgramTypes::VertexShader].dirty = true;
   }
 
 
   void D3D9DeviceEx::SetPixelBoolBitfield(uint32_t idx, uint32_t mask, uint32_t bits) {
-    m_state.psConsts.bConsts[idx] &= ~mask;
-    m_state.psConsts.bConsts[idx] |= bits & mask;
+    m_state.psConsts->bConsts[idx] &= ~mask;
+    m_state.psConsts->bConsts[idx] |= bits & mask;
 
     m_consts[DxsoProgramTypes::PixelShader].dirty = true;
   }
@@ -7246,11 +7244,11 @@ namespace dxvk {
     for (uint32_t i = 0; i < caps::MaxStreams; i++)
       m_state.streamFreq[i] = 1;
 
-    for (uint32_t i = 0; i < m_state.textures.size(); i++)
+    for (uint32_t i = 0; i < m_state.textures->size(); i++)
       SetStateTexture(i, nullptr);
 
     EmitCs([
-      cSize = m_state.textures.size()
+      cSize = m_state.textures->size()
     ](DxvkContext* ctx) {
       VkShaderStageFlags stage = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
@@ -7265,7 +7263,7 @@ namespace dxvk {
     m_depthTextures = 0;
     m_cubeTextures = 0;
 
-    auto& ss = m_state.samplerStates;
+    auto& ss = m_state.samplerStates.get();
     for (uint32_t i = 0; i < ss.size(); i++) {
       auto& state = ss[i];
       state[D3DSAMP_ADDRESSU]      = D3DTADDRESS_WRAP;
